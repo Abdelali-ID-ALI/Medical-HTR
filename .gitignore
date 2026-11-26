@@ -24,3 +24,4 @@ Data/
 *.xml
 .pytest_cache/
 qdrant_db_v2/
+qdrant_medical/

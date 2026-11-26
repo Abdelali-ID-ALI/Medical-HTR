@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
 BASE_MODEL = "microsoft/trocr-base-handwritten"
 EMBEDDING_MODEL = "pritamdeka/S-PubMedBert-MS-MARCO"
-COLLECTION = "drugbank_pubmedbert_v2"
+COLLECTION = "drugbank_pubmedbert"
 
 def flag(name: str) -> bool:
     return os.getenv(name, "false").lower() in {"true", "1", "yes"}
@@ -21,4 +21,4 @@ class Settings:
     gemini_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     allow_external_text: bool = flag("GEMINI_ALLOW_EXTERNAL_TEXT")
-    qdrant_path: str = os.getenv("QDRANT_PATH", str(ROOT / "qdrant_db_v2"))
+    qdrant_path: str = os.getenv("QDRANT_PATH", str(ROOT / "qdrant_medical"))

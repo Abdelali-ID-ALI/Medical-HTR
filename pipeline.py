@@ -17,7 +17,8 @@ class InvalidImage(ValueError):
 
 class PrescriptionPipeline:
     def __init__(self, settings: Settings):
-        self.reader = PrescriptionReader(settings)
+        self.settings = settings
+        self.reader = None
         self.extractor = GeminiExtractor(settings)
         self.retriever = DrugRetriever(settings.qdrant_path)
 
@@ -33,6 +34,8 @@ class PrescriptionPipeline:
             raise
         except Exception as exc:
             raise InvalidImage("Invalid image.") from exc
+        if self.reader is None:
+            self.reader = PrescriptionReader(self.settings)
         scanned = scan_document(bgr, debug=False)
         h, w = scanned.shape[:2]
         segmentor = LineSegmentor(kernel_width=max(5, round(w * .05)),
@@ -52,6 +55,15 @@ class PrescriptionPipeline:
                 warnings.append(f"Line {segment['index']} unread or rejected.")
             lines.append(Line(index=segment["index"], bbox=segment["bbox"],
                               quality_score=segment["quality_score"], text=text, accepted=accepted))
+        return self._report(lines, warnings, self.reader.model_mode)
+
+    def run_text(self, text: str) -> Report:
+        lines = [Line(index=i, bbox=None, quality_score=None, text=line, accepted=True)
+                 for i, line in enumerate(text.splitlines()) if line.strip()]
+        return self._report(lines, ["User-supplied text; no OCR or image quality assessment performed."],
+                            "text_only", raw_text=text)
+
+    def _report(self, lines, warnings, model_mode, raw_text=None):
         mentions, matches = [], []
         if any(line.text for line in lines):
             mentions, extraction_warnings = self.extractor.extract(lines)
@@ -59,8 +71,8 @@ class PrescriptionPipeline:
             matches = [self.retriever.search(mention) for mention in mentions]
         if not mentions:
             warnings.append("No medication mentions extracted; absence is not confirmed.")
-        return Report(model_mode=self.reader.model_mode,
-                      raw_text="\n".join(line.text for line in lines if line.text),
+        return Report(model_mode=model_mode,
+                      raw_text=raw_text if raw_text is not None else "\n".join(line.text for line in lines if line.text),
                       lines=lines, medicines=matches, warnings=warnings)
 
     def close(self):

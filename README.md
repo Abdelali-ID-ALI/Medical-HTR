@@ -2,7 +2,7 @@
 
 Research prototype; not a clinically validated tool. It transcribes images, extracts verbatim medication mentions and proposes DrugBank candidates for human review. It does not confirm prescriptions, doses, treatments or drug safety.
 
-## Architecture (V2)
+## Architecture
 
 ```mermaid
 flowchart TD
@@ -11,6 +11,7 @@ flowchart TD
     C --> D[TrOCR configurable checkpoint]
     D --> E[Raw transcription and line coordinates]
     E --> F[Gemini structured verbatim extraction]
+    T[User-supplied text] --> F
     F --> G[Exact names and aliases]
     G --> H[RapidFuzz lexical shortlist]
     G --> I[PubMedBERT and Qdrant]
@@ -21,7 +22,7 @@ flowchart TD
     M --> I
 ```
 
-FastAPI orchestrates the pipeline via POST /extract. Exact aliases bypass fuzzy/vector search; when no exact match exists, vector results only rerank lexically plausible candidates. Gemini extracts fields before retrieval, so this is **information extraction + hybrid retrieval/entity linking**, not generative RAG. The raw OCR text is preserved. Bounding boxes refer to the deskewed/scanned image; quality score is an image heuristic, not calibrated OCR confidence. Human review is always required.
+FastAPI orchestrates the image pipeline via POST /extract and the text-only pipeline via POST /extract-text. Both share the same NLP components and local index. Exact aliases bypass fuzzy/vector search; when no exact match exists, vector results only rerank lexically plausible candidates. Gemini extracts fields before retrieval, so this is **information extraction + hybrid retrieval/entity linking**, not generative RAG. The raw OCR text is preserved. Bounding boxes refer to the deskewed/scanned image; quality score is an image heuristic, not calibrated OCR confidence. Human review is always required.
 
 ## Files
 - scanner.py, preprocessing.py, segmentation.py: existing OpenCV modules adapted to in-memory processing.
@@ -34,7 +35,7 @@ FastAPI orchestrates the pipeline via POST /extract. Exact aliases bypass fuzzy/
 
 ## Historical evidence and current limitations
 
-The archived notebook reports 3,120 training, 780 validation and 780 test images and CER 3.10% on its test set. It appears to concern medication-name crops, not full prescription accuracy. Fine-tuned weights are unavailable; the notebook and its outputs are retained, not independently reproduced. The historical retrieval experiment reports 10,562 indexed records. V2 changes the representation to names/aliases for identity matching and requires rebuilding the index. Historical retrieval results are not V2 results. The lexical cutoff (70) and RRF weights are uncalibrated heuristics. The integration has not been exercised end-to-end, and dependency ranges are not a tested lockfile. No synthetic performance claims are made.
+The archived notebook reports 3,120 training, 780 validation and 780 test images and CER 3.10% on its test set. It appears to concern medication-name crops, not full prescription accuracy. Fine-tuned weights are unavailable; the notebook and its outputs are retained, not independently reproduced. The historical retrieval experiment reports 10,562 indexed records. The current implementation uses names/aliases for identity matching and requires rebuilding the index. Historical retrieval results do not measure the current implementation. The lexical cutoff (70) and RRF weights are uncalibrated heuristics. The integration has not been exercised end-to-end, and dependency ranges are not a tested lockfile. No synthetic performance claims are made.
 
 ## Local setup (Python 3.11 recommended)
 
@@ -45,7 +46,27 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Restore the complete fine-tuned model and processor to TROCR_MODEL_PATH if available. Otherwise explicitly set TROCR_ALLOW_BASE_FALLBACK=true for a generic model demo; the historical CER does not apply. Use CPU by default or set TROCR_DEVICE=cuda on a compatible machine.
+## Model setup and execution modes
+
+### 1. Specialized model (preferred)
+
+Restore the complete fine-tuned checkpoint and processor to `TROCR_MODEL_PATH` (default `./models/trocr-medical-finetuned`). Set `TROCR_ALLOW_BASE_FALLBACK=false`. The original specialized weights are currently unavailable; this mode cannot execute until they are restored or reproduced.
+
+### 2. Reproduce the fine-tuning
+
+Obtain the original authorized image dataset and labels (not the DrugBank XML). Its exact public source and license are not documented. Adapt the paths and columns in `prepare_trocr_data.py` (requires mapping.json, train/val/test label CSVs) to produce file_name,text CSVs. In Google Colab with a GPU, open `notebooks/fine.ipynb`, adapt ROOT_DIR and place CSVs and train/val/test images in the expected folders. Run cells 1–4: dependencies and Drive, datasets, fine-tuning, held-out evaluation. Historical settings: base handwritten TrOCR, batch 8, 3 epochs, learning rate 4e-5, FP16, selection by validation CER. Check version compatibility, data leakage and checkpoint warnings before reuse. Save both model and processor with save_pretrained (the notebook uses trainer.save_model for the model); copy the complete directory into TROCR_MODEL_PATH. Record fresh metrics separately; exact reproduction is not guaranteed.
+
+### 3. No fine-tuning: generic TrOCR
+
+When specialized weights are absent, set `TROCR_ALLOW_BASE_FALLBACK=true`. The first image request downloads [microsoft/trocr-base-handwritten](https://huggingface.co/microsoft/trocr-base-handwritten) and its processor if not cached. Internet and storage are required on first use. This is a generic model, not the specialized one; the historical 3.10% CER does not apply. Use CPU by default or configure TROCR_DEVICE=cuda.
+
+### 4. No TrOCR: text-only mode
+
+POST /extract-text accepts JSON with a non-blank text field (up to 20,000 characters). It bypasses the image pipeline and does not instantiate or download TrOCR. The same Gemini extractor and DrugBank retriever are used; PubMedBERT, an index and authorized Gemini configuration remain necessary. Image coordinates and quality scores are null, model_mode is text_only, and original text is retained. This is not a test of handwriting recognition.
+
+## Knowledge base and API
+
+The indexer downloads [S-PubMedBert-MS-MARCO](https://huggingface.co/pritamdeka/S-PubMedBert-MS-MARCO) when not cached. The same model is used for retrieval. The default index directory is `./qdrant_medical`; use a fresh directory to avoid incompatible historical indexes.
 
 Use a licensed/authorized DrugBank XML export, never commit it or generated artifacts. Build a new local index (not the historical MiniLM or in-memory index):
 
@@ -58,9 +79,10 @@ Optional smoke index: use --limit 10 and a separate --db-path, then point QDRANT
 ```bash
 uvicorn api.main:app --host 127.0.0.1 --port 8000 --workers 1
 curl -F 'file=@demo.png;type=image/png' http://127.0.0.1:8000/extract
+curl -H 'Content-Type: application/json' -d '{"text":"MED-A"}' http://127.0.0.1:8000/extract-text
 ```
 
-GET / reports API liveness and whether the pipeline is initialized, not clinical readiness. POST /extract returns HTTP 503 if required artifacts or configuration are absent; there are no simulated successful results. Local Qdrant requires a single process. No deployment, public exposure, or clinical use is intended.
+GET / reports API liveness and whether the pipeline is initialized, not clinical readiness. Image or text extraction returns HTTP 503 on initialization failure; image extraction also reports missing model artifacts; there are no simulated successful results. Local Qdrant requires a single process. No deployment, public exposure, or clinical use is intended.
 
 ## Minimal verification to perform when artifacts are available
 

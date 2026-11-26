@@ -5,8 +5,8 @@ class StrictModel(BaseModel):
 
 class Line(StrictModel):
     index: int
-    bbox: tuple[int, int, int, int]
-    quality_score: float
+    bbox: tuple[int, int, int, int] | None
+    quality_score: float | None
     text: str | None
     accepted: bool
 
@@ -40,3 +40,6 @@ class Report(StrictModel):
     medicines: list[Match]
     warnings: list[str]
     requires_human_review: bool = True
+
+class TextRequest(StrictModel):
+    text: str = Field(min_length=1, max_length=20000)
