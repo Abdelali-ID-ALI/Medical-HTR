@@ -1,51 +1,30 @@
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+from pathlib import Path
 from PIL import Image
-import time
+import torch
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+from config import TROCR_MODEL_PATH, TROCR_BASE_MODEL, ALLOW_BASE_MODEL
 
 class PrescriptionReader:
-    def __init__(self, model_name="microsoft/trocr-base-handwritten"):
-        print(f"Chargement du modèle {model_name}... (Cela peut prendre 1-2 minutes la première fois)")
-        # Le Processor prépare l'image (redimensionnement, normalisation)
+    def __init__(self, model_name=None):
+        if model_name is None:
+            if Path(TROCR_MODEL_PATH).is_dir():
+                model_name = TROCR_MODEL_PATH
+            elif ALLOW_BASE_MODEL:
+                model_name = TROCR_BASE_MODEL
+            else:
+                raise FileNotFoundError("Fine-tuned checkpoint unavailable; configure TROCR_MODEL_PATH or explicitly enable ALLOW_BASE_MODEL.")
+        self.model_id = model_name
+        self.model_mode = "base" if model_name == TROCR_BASE_MODEL else "custom_checkpoint"
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.processor = TrOCRProcessor.from_pretrained(model_name)
-        # Le Model est le réseau de neurones (ViT + RoBERTa)
-        self.model = VisionEncoderDecoderModel.from_pretrained(model_name)
-        print("Modèle chargé et prêt !")
+        self.model = VisionEncoderDecoderModel.from_pretrained(model_name).to(self.device).eval()
+
+    @torch.inference_mode()
+    def read_image(self, image):
+        pixels = self.processor(images=image.convert("RGB"), return_tensors="pt").pixel_values.to(self.device)
+        ids = self.model.generate(pixels)
+        return self.processor.batch_decode(ids, skip_special_tokens=True)[0]
 
     def read_line(self, image_path):
-        # Charger l'image avec PIL (Pillow) au lieu d'OpenCV
-        try:
-            image = Image.open(image_path).convert("RGB")
-        except Exception as e:
-            print(f"Erreur lors du chargement de l'image: {e}")
-            return None
-
-        print(f"Analyse de l'image : {image_path}...")
-        start_time = time.time()
-
-        # 1. Préparation des pixels pour le modèle Transformer
-        pixel_values = self.processor(images=image, return_tensors="pt").pixel_values
-
-        # 2. Génération du texte (Inférence)
-        generated_ids = self.model.generate(pixel_values)
-
-        # 3. Décodage des IDs générés en texte lisible
-        generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        
-        end_time = time.time()
-        print(f"Temps d'inférence : {round(end_time - start_time, 2)} secondes")
-        
-        return generated_text
-
-if __name__ == "__main__":
-    # Instanciation
-    reader = PrescriptionReader()
-    
-    # ATTENTION : Mets ici le chemin vers une image contenant UNE SEULE LIGNE de texte !
-    image_ligne = "/home/Abdelali/Pictures/med/Screenshot_20260415_175450.png"
-    
-    texte_extrait = reader.read_line(image_ligne)
-    
-    print("\n" + "="*50)
-    print("RÉSULTAT DE L'EXTRACTION :")
-    print(texte_extrait)
-    print("="*50 + "\n")
+        with Image.open(image_path) as image:
+            return self.read_image(image)
