@@ -242,6 +242,8 @@ class LineSegmentor:
         image_path: str,
         correct_skew: bool = True,
         prepare_trocr: bool = True,
+        include_rejected: bool = False,
+        preprocessor=None,
     ) -> list[dict]:
         """
         Pipeline complet de segmentation d'une ordonnance en lignes.
@@ -262,7 +264,7 @@ class LineSegmentor:
             }
         """
         # Chargement
-        image = cv2.imread(image_path)
+        image = image_path.copy() if isinstance(image_path, np.ndarray) else cv2.imread(str(image_path))
         if image is None:
             raise ValueError(f"Impossible de charger l'image : {image_path}")
 
@@ -278,7 +280,8 @@ class LineSegmentor:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         # 2 — Binarisation (BINARY_INV pour la dilatation)
-        binary_inv = self._binarize(gray)
+        binary_inv = (cv2.bitwise_not(preprocessor.process(image)[1])
+                      if preprocessor is not None else self._binarize(gray))
 
         # 3 — Dilatation horizontale
         dilated = self._dilate_lines(binary_inv)
@@ -295,8 +298,8 @@ class LineSegmentor:
             crop = self._crop_line(image_orig, box)
 
             score = self.quality_score(crop)
-            if score < self.quality_threshold:
-                print(f"  Ligne {i} ignorée (qualité : {score})")
+            accepted = score >= self.quality_threshold and crop.size > 0
+            if not accepted and not include_rejected:
                 continue
 
             trocr_ready = self.prepare_for_trocr(crop) if prepare_trocr else crop
@@ -307,6 +310,7 @@ class LineSegmentor:
                 "image_trocr":   trocr_ready,
                 "bbox":          box,
                 "quality_score": score,
+                "accepted": accepted,
             })
 
         print(f"  {len(lignes)} lignes valides retenues "

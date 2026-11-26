@@ -28,15 +28,15 @@ def four_point_transform(image, pts):
     warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
     return warped
 
-def scan_document(image_path, debug=True):
-    image = cv2.imread(image_path)
+def scan_document(image_path, debug=False):
+    image = image_path.copy() if isinstance(image_path, np.ndarray) else cv2.imread(str(image_path))
     if image is None:
         raise ValueError("Image introuvable.")
     orig = image.copy()
     
     # 1. Redimensionner (facilite les calculs d'aire)
     ratio = image.shape[0] / 500.0
-    image_resized = cv2.resize(image, (int(image.shape[1]/ratio), 500))
+    image_resized = cv2.resize(image, (max(1, int(image.shape[1]/ratio)), 500))
 
     # 2. Prétraitement lourd pour isoler LA FEUILLE
     gray = cv2.cvtColor(image_resized, cv2.COLOR_BGR2GRAY)
@@ -69,7 +69,7 @@ def scan_document(image_path, debug=True):
         peri = cv2.arcLength(c, True)
         approx = cv2.approxPolyDP(c, 0.02 * peri, True)
         
-        if len(approx) == 4:
+        if len(approx) == 4 and cv2.isContourConvex(approx) and len(np.unique(order_points(approx.reshape(4, 2)), axis=0)) == 4:
             screenCnt = approx
             break
 

@@ -9,6 +9,8 @@ class PrescriptionPreprocessor:
         :param block_size: Taille du voisinage pour la binarisation adaptative (doit être impair).
         :param c: Constante soustraite de la moyenne calculée (pour ajuster le contraste).
         """
+        if block_size < 3 or block_size % 2 == 0:
+            raise ValueError("block_size must be odd and >= 3")
         self.block_size = block_size
         self.c = c
 
@@ -20,7 +22,7 @@ class PrescriptionPreprocessor:
 
     def process(self, image_path):
         # 1. Chargement et passage en niveaux de gris
-        img = self.load_image(image_path)
+        img = image_path.copy() if isinstance(image_path, np.ndarray) else self.load_image(str(image_path))
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         # 2. Débruitage (Filtre Bilatéral)

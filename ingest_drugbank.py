@@ -1,96 +1,89 @@
+"""Rebuild the local retrieval index from an authorized DrugBank XML export."""
+import argparse
+import json
+from pathlib import Path
 import xml.etree.ElementTree as ET
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Qdrant
-from langchain_core.documents import Document
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient, models
+from config import COLLECTION, EMBEDDING_MODEL, Settings
 
-XML_FILE = "drugbank.xml"
-LIMIT = 10  # Toujours 10 pour le test
+NS = {"db": "http://www.drugbank.ca"}
 
-def parse_drugbank(file_path, limit):
-    documents = []
+def parse_drugbank(path, limit=None):
+    # Only direct children of the root are drug records; nested drug references are not records.
+    stack = []
     count = 0
-    
-    # L'arme secrète : on déclare le namespace officiel de DrugBank
-    ns = {'db': 'http://www.drugbank.ca'}
-    
-    print(f"⏳ Lecture en streaming de {file_path} (Limite : {limit} médicaments)...")
-    context = ET.iterparse(file_path, events=('end',))
-    
-    for event, elem in context:
-        # On cible explicitement la balise "drug" avec son namespace
-        if elem.tag == '{http://www.drugbank.ca}drug':
-            
-            # 1. Extraction de l'ID (Méthode XPath avec namespace)
-            # 1. Extraction de l'ID (Méthode robuste en boucle)
-            drug_id = "Unknown_ID"
-            for id_node in elem.findall("./db:drugbank-id", ns):
-                if id_node.get('primary') == 'true':
-                    drug_id = id_node.text
-                    break
-            
-            # 2. Extraction du Nom
-            name_node = elem.find("./db:name", ns)
-            name = name_node.text if name_node is not None else "Unknown_Name"
-            
-            # 3. Extraction des Dosages
-            dosages = []
-            # On cherche partout (.//) les balises strength à l'intérieur de dosage
-            for strength_node in elem.findall(".//db:dosage/db:strength", ns):
-                if strength_node.text:
-                    dosages.append(strength_node.text)
-            
-            dosages = list(set(dosages)) # Dédoublonnage
-            dosages_str = ", ".join(dosages) if dosages else "Not specified"
+    for event, element in ET.iterparse(path, events=("start", "end")):
+        if event == "start":
+            stack.append(element)
+            continue
+        if len(stack) == 2:
+            if element.tag == "{http://www.drugbank.ca}drug":
+                identifier = next((node.text for node in element.findall("db:drugbank-id", NS)
+                                   if node.get("primary") == "true"), None)
+                name = (element.findtext("db:name", default="", namespaces=NS) or "").strip()
+                if identifier and name:
+                    aliases = [name]
+                    for xpath in ("db:synonyms/db:synonym", "db:international-brands/db:international-brand/db:name",
+                                  "db:products/db:product/db:name"):
+                        aliases.extend(n.text.strip() for n in element.findall(xpath, NS) if n.text and n.text.strip())
+                    description = element.findtext("db:description", default="", namespaces=NS) or ""
+                    yield {"drugbank_id": identifier, "name": name,
+                           "aliases": sorted(set(aliases)), "description": description}
+                    count += 1
+            stack[0].remove(element)
+            element.clear()
+        stack.pop()
+        if limit is not None and count >= limit:
+            break
 
-            # 4. Extraction des Interactions
-            interactions = []
-            for inter_node in elem.findall(".//db:drug-interaction", ns)[:3]:
-                inter_name = inter_node.find("./db:name", ns)
-                inter_desc = inter_node.find("./db:description", ns)
-                if inter_name is not None and inter_desc is not None:
-                    interactions.append(f"{inter_name.text} ({inter_desc.text})")
-            
-            interactions_str = " | ".join(interactions) if interactions else "No reported interactions."
+def build_index(xml_path, db_path, limit=None):
+    path = Path(db_path)
+    # Build in a new directory to prevent mixing incompatible embeddings.
+    if path.exists() and any(path.iterdir()):
+        raise ValueError("Index directory is not empty. Choose a new QDRANT_PATH.")
+    path.mkdir(parents=True, exist_ok=True)
+    encoder = SentenceTransformer(EMBEDDING_MODEL)
+    client = QdrantClient(path=str(path))
+    count = 0
+    try:
+        dimension = encoder.get_sentence_embedding_dimension()
+        client.create_collection(COLLECTION, vectors_config=models.VectorParams(
+            size=dimension, distance=models.Distance.COSINE))
+        batch = []
+        def insert(records):
+            nonlocal count
+            # Index identity-focused text, not long interaction descriptions.
+            vectors = encoder.encode(
+                [r["name"] + " | " + " | ".join(r["aliases"]) for r in records],
+                normalize_embeddings=True, show_progress_bar=False)
+            points = [models.PointStruct(id=count+i, vector=v.tolist(), payload=r)
+                      for i, (v, r) in enumerate(zip(vectors, records))]
+            client.upsert(COLLECTION, points=points, wait=True)
+            count += len(points)
+        for record in parse_drugbank(xml_path, limit):
+            batch.append(record)
+            if len(batch) == 64:
+                insert(batch)
+                batch = []
+        if batch:
+            insert(batch)
+        if count == 0:
+            raise ValueError("No DrugBank records found.")
+        (path / "medical_htr_manifest.json").write_text(json.dumps({
+            "model": EMBEDDING_MODEL, "collection": COLLECTION, "count": count,
+            "limited": limit is not None, "representation": "name_and_aliases_v1",
+        }, indent=2), encoding="utf-8")
+    finally:
+        client.close()
+    return count
 
-            # 5. Création du Document pour Qdrant
-            page_content = f"Drug: {name}. Standard dosages: {dosages_str}. Safety and Interactions: {interactions_str}"
-            metadata = {
-                "id": drug_id,
-                "name": name,
-                "known_dosages": dosages_str
-            }
-
-            documents.append(Document(page_content=page_content, metadata=metadata))
-            
-            # Nettoyage de la RAM
-            elem.clear()
-            count += 1
-            
-            if count >= limit:
-                break
-                
-    return documents
-
-# --- EXÉCUTION ---
-docs = parse_drugbank(XML_FILE, LIMIT)
-
-print(f"\n✅ {len(docs)} médicaments extraits. Voici un aperçu du premier :")
-print("-" * 50)
-print(f"Contenu vectorisé : \n{docs[0].page_content}")
-print(f"Métadonnées : {docs[0].metadata}")
-print("-" * 50)
-
-print("\n🧠 Chargement du modèle de vectorisation Sentence-Transformers...")
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-DB_PATH = "./qdrant_db"
-
-print(f"\n💾 Sauvegarde de la base vectorielle dans : {DB_PATH}")
-qdrant_db = Qdrant.from_documents(
-    docs,
-    embeddings,
-    path=DB_PATH,
-    collection_name="drugbank_v1",
-)
-
-print("\n🚀 SUCCESS : Pipeline RAG initialisé avec succès !")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("xml_path")
+    parser.add_argument("--db-path", default=Settings().qdrant_path)
+    parser.add_argument("--limit", type=int)
+    args = parser.parse_args()
+    if args.limit is not None and args.limit < 1:
+        parser.error("--limit must be positive")
+    print(f"Indexed {build_index(args.xml_path, args.db_path, args.limit)} records.")

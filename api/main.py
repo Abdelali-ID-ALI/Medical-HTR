@@ -1,63 +1,58 @@
+from contextlib import asynccontextmanager
+from threading import Lock
+import logging
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
-import time
+from starlette.concurrency import run_in_threadpool
+from config import Settings
+from schemas import Report
+from pipeline import PrescriptionPipeline, InvalidImage
 
-# 1. Initialisation de l'application FastAPI
-app = FastAPI(
-    title="Medical HTR API",
-    description="API d'extraction et de validation d'ordonnances médicales manuscrites.",
-    version="1.0.0"
-)
+logger = logging.getLogger(__name__)
+MAX_BYTES = 10 * 1024 * 1024
+lock = Lock()
 
-# 2. Route de vérification de santé (Health Check)
-@app.get("/")
-async def root():
-    return {"status": "online", "message": "Medical HTR API is running."}
-
-# 3. La Route principale : Réception de l'image et Extraction
-@app.post("/extract")
-async def extract_prescription(file: UploadFile = File(...)):
-    # Vérification que le fichier est bien une image
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Le fichier doit être une image (JPEG, PNG).")
-
+@asynccontextmanager
+async def lifespan(app):
+    app.state.pipeline = None
     try:
-        # Lecture de l'image en mémoire (sans la sauvegarder sur le disque !)
-        image_bytes = await file.read()
-        
-        print(f"📥 Reçu : {file.filename} ({len(image_bytes)} bytes)")
-        
-        # =====================================================================
-        # 🚧 ZONE D'INTÉGRATION DU PIPELINE IA 🚧
-        # Ici, nous appellerons plus tard : 
-        # resultat = run_full_pipeline(image_bytes)
-        # =====================================================================
-        
-        # SIMULATION DU TRAITEMENT (Pour tester l'API)
-        time.sleep(1.5) # Simule le temps de calcul d'OpenCV + TrOCR + RAG
-        
-        mock_result = {
-            "patient": {"nom": "Non détecté", "age": "Non détecté"},
-            "diagnostic": "Fièvre",
-            "medicaments": [
-                {
-                    "nom_extrait": "Lepirudin",
-                    "dosage_extrait": "50mg",
-                    "frequence": "1 injection",
-                    "validation_rag": {
-                        "statut": "VERIFIED",
-                        "molecule_officielle": "Lepirudin",
-                        "alerte_drugbank": "No reported interactions."
-                    }
-                }
-            ],
-            "metadonnees": {
-                "confiance_ocr_globale": 0.89,
-                "temps_traitement_ms": 1500
-            }
-        }
-        
-        return JSONResponse(content=mock_result)
+        yield
+    finally:
+        if app.state.pipeline is not None:
+            app.state.pipeline.close()
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur interne lors du traitement : {str(e)}")
+app = FastAPI(title="Medical-HTR", version="2.0.0", lifespan=lifespan,
+              description="Experimental transcription and candidate retrieval, not clinical validation.")
+
+@app.get("/")
+def root():
+    return {"status": "online", "pipeline_loaded": app.state.pipeline is not None}
+
+def process(data):
+    # Local Qdrant and model access are serialized in this single-worker prototype.
+    with lock:
+        if app.state.pipeline is None:
+            try:
+                app.state.pipeline = PrescriptionPipeline(Settings())
+            except Exception as exc:
+                logger.error("Pipeline initialization failed (%s)", type(exc).__name__)
+                raise HTTPException(503, "Pipeline unavailable; check local configuration and artifacts.") from exc
+        return app.state.pipeline.run(data)
+
+@app.post("/extract", response_model=Report)
+async def extract_prescription(file: UploadFile = File(...)):
+    try:
+        if file.content_type not in {"image/jpeg", "image/png"}:
+            raise HTTPException(415, "JPEG or PNG required.")
+        data = await file.read(MAX_BYTES + 1)
+        if not data or len(data) > MAX_BYTES:
+            raise HTTPException(413, "Empty file or size limit exceeded.")
+        return await run_in_threadpool(process, data)
+    except InvalidImage as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("Extraction failed (%s)", type(exc).__name__)
+        raise HTTPException(500, "Extraction failed; no result was fabricated.") from exc
+    finally:
+        await file.close()

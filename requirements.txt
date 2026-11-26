@@ -1,0 +1,16 @@
+# Runtime dependency ranges; not yet validated in a clean environment.
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.18,<1
+pydantic>=2.9,<3
+python-dotenv>=1,<2
+numpy>=1.26,<3
+opencv-python-headless>=4.10,<5
+matplotlib>=3.8,<4
+Pillow>=10.4,<13
+torch>=2.4,<3
+transformers>=4.48,<5
+sentence-transformers>=3.4,<6
+qdrant-client>=1.12,<2
+rapidfuzz>=3.9,<4
+google-genai>=1,<2

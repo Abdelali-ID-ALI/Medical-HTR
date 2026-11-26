@@ -1,51 +1,32 @@
-from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+"""TrOCR inference with an explicit checkpoint and opt-in base fallback."""
+from pathlib import Path
 from PIL import Image
-import time
+import cv2
+import torch
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel
+from config import BASE_MODEL, Settings
 
 class PrescriptionReader:
-    def __init__(self, model_name="microsoft/trocr-base-handwritten"):
-        print(f"Chargement du modèle {model_name}... (Cela peut prendre 1-2 minutes la première fois)")
-        # Le Processor prépare l'image (redimensionnement, normalisation)
+    def __init__(self, settings: Settings):
+        target = Path(settings.model_path)
+        if target.is_dir() and (target / "config.json").is_file():
+            model_name, self.model_mode = str(target), "fine_tuned_checkpoint"
+        elif settings.allow_base_fallback:
+            model_name, self.model_mode = BASE_MODEL, "base_model"
+        else:
+            raise FileNotFoundError("Fine-tuned checkpoint missing; restore it or explicitly enable base fallback.")
+        self.model_name = model_name
+        self.device = torch.device(settings.device)
         self.processor = TrOCRProcessor.from_pretrained(model_name)
-        # Le Model est le réseau de neurones (ViT + RoBERTa)
-        self.model = VisionEncoderDecoderModel.from_pretrained(model_name)
-        print("Modèle chargé et prêt !")
+        self.model = VisionEncoderDecoderModel.from_pretrained(model_name).to(self.device).eval()
 
-    def read_line(self, image_path):
-        # Charger l'image avec PIL (Pillow) au lieu d'OpenCV
-        try:
-            image = Image.open(image_path).convert("RGB")
-        except Exception as e:
-            print(f"Erreur lors du chargement de l'image: {e}")
-            return None
-
-        print(f"Analyse de l'image : {image_path}...")
-        start_time = time.time()
-
-        # 1. Préparation des pixels pour le modèle Transformer
-        pixel_values = self.processor(images=image, return_tensors="pt").pixel_values
-
-        # 2. Génération du texte (Inférence)
-        generated_ids = self.model.generate(pixel_values)
-
-        # 3. Décodage des IDs générés en texte lisible
-        generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        
-        end_time = time.time()
-        print(f"Temps d'inférence : {round(end_time - start_time, 2)} secondes")
-        
-        return generated_text
-
-if __name__ == "__main__":
-    # Instanciation
-    reader = PrescriptionReader()
-    
-    # ATTENTION : Mets ici le chemin vers une image contenant UNE SEULE LIGNE de texte !
-    image_ligne = "/home/Abdelali/Pictures/med/Screenshot_20260415_175450.png"
-    
-    texte_extrait = reader.read_line(image_ligne)
-    
-    print("\n" + "="*50)
-    print("RÉSULTAT DE L'EXTRACTION :")
-    print(texte_extrait)
-    print("="*50 + "\n")
+    @torch.inference_mode()
+    def read_line(self, image):
+        if isinstance(image, (str, Path)):
+            with Image.open(image) as opened:
+                image = opened.convert("RGB")
+        elif not isinstance(image, Image.Image):
+            image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        pixels = self.processor(images=image.convert("RGB"), return_tensors="pt").pixel_values.to(self.device)
+        generated = self.model.generate(pixels, max_new_tokens=128)
+        return self.processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
