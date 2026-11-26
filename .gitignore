@@ -1,18 +1,12 @@
-# Environnement virtuel
 venv/
+.venv/
 __pycache__/
 *.pyc
-
-# Bases de données et modèles locaux
 qdrant_db/
+models/
 *.safetensors
 *.bin
 .lock
-
-# Données lourdes
-Data/archive*.zip
-Data/drugbank.zip
+Data/
 drugbank.xml
-
-# Variables d'environnement
 .env
