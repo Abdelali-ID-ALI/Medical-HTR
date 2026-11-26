@@ -1,63 +1,41 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse
-import time
+from contextlib import asynccontextmanager
+from threading import Lock
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request
+from pipeline import Pipeline
+from schemas import PrescriptionResult
 
-# 1. Initialisation de l'application FastAPI
-app = FastAPI(
-    title="Medical HTR API",
-    description="API d'extraction et de validation d'ordonnances médicales manuscrites.",
-    version="1.0.0"
-)
+MAX_BYTES = 10 * 1024 * 1024
 
-# 2. Route de vérification de santé (Health Check)
-@app.get("/")
-async def root():
-    return {"status": "online", "message": "Medical HTR API is running."}
-
-# 3. La Route principale : Réception de l'image et Extraction
-@app.post("/extract")
-async def extract_prescription(file: UploadFile = File(...)):
-    # Vérification que le fichier est bien une image
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="Le fichier doit être une image (JPEG, PNG).")
-
+@asynccontextmanager
+async def lifespan(app):
+    app.state.pipeline = None
+    app.state.lock = Lock()
     try:
-        # Lecture de l'image en mémoire (sans la sauvegarder sur le disque !)
-        image_bytes = await file.read()
-        
-        print(f"📥 Reçu : {file.filename} ({len(image_bytes)} bytes)")
-        
-        # =====================================================================
-        # 🚧 ZONE D'INTÉGRATION DU PIPELINE IA 🚧
-        # Ici, nous appellerons plus tard : 
-        # resultat = run_full_pipeline(image_bytes)
-        # =====================================================================
-        
-        # SIMULATION DU TRAITEMENT (Pour tester l'API)
-        time.sleep(1.5) # Simule le temps de calcul d'OpenCV + TrOCR + RAG
-        
-        mock_result = {
-            "patient": {"nom": "Non détecté", "age": "Non détecté"},
-            "diagnostic": "Fièvre",
-            "medicaments": [
-                {
-                    "nom_extrait": "Lepirudin",
-                    "dosage_extrait": "50mg",
-                    "frequence": "1 injection",
-                    "validation_rag": {
-                        "statut": "VERIFIED",
-                        "molecule_officielle": "Lepirudin",
-                        "alerte_drugbank": "No reported interactions."
-                    }
-                }
-            ],
-            "metadonnees": {
-                "confiance_ocr_globale": 0.89,
-                "temps_traitement_ms": 1500
-            }
-        }
-        
-        return JSONResponse(content=mock_result)
+        yield
+    finally:
+        if app.state.pipeline is not None:
+            app.state.pipeline.close()
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erreur interne lors du traitement : {str(e)}")
+app = FastAPI(title="Medical-HTR research prototype", version="2.0", lifespan=lifespan)
+
+@app.get("/")
+def root():
+    return {"status": "online", "pipeline_loaded": app.state.pipeline is not None,
+            "clinical_validation": False}
+
+@app.post("/extract", response_model=PrescriptionResult)
+def extract_prescription(request: Request, file: UploadFile = File(...)):
+    if file.content_type not in ("image/jpeg", "image/png"):
+        raise HTTPException(415, "Expected JPEG or PNG")
+    data = file.file.read(MAX_BYTES + 1)
+    if len(data) > MAX_BYTES:
+        raise HTTPException(413, "Image too large")
+    try:
+        with request.app.state.lock:
+            if request.app.state.pipeline is None:
+                request.app.state.pipeline = Pipeline()
+            return request.app.state.pipeline.run(data)
+    except ValueError:
+        raise HTTPException(422, "Invalid image or unsupported extraction result")
+    except Exception:
+        raise HTTPException(503, "Pipeline unavailable; check model, index and configuration")
