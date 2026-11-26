@@ -1,0 +1,16 @@
+torch
+transformers
+Pillow
+opencv-python-headless
+numpy
+matplotlib
+pandas
+sentence-transformers
+qdrant-client
+rapidfuzz
+google-genai
+pydantic>=2
+python-dotenv
+fastapi
+uvicorn
+python-multipart
