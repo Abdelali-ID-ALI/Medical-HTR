@@ -31,7 +31,8 @@ FastAPI orchestrates the image pipeline via POST /extract and the text-only pipe
 - ingest_drugbank.py, retrieval.py: consistent PubMedBERT indexing and hybrid search.
 - pipeline.py, schemas.py, config.py: orchestration, data contracts and settings.
 - api/main.py: real API, lazy initialization and explicit errors.
-- notebooks/fine.ipynb, notebooks/RAG.ipynb: unchanged historical experiments.
+- `notebooks/01_trocr_medical_finetuning.ipynb`: historical TrOCR fine-tuning and held-out CER evaluation.
+- `notebooks/02_drugbank_vector_retrieval.ipynb`: historical DrugBank parsing, PubMedBERT embeddings and Qdrant retrieval experiments; not the current hybrid retrieval implementation.
 
 ## Historical evidence and current limitations
 
@@ -54,7 +55,7 @@ Restore the complete fine-tuned checkpoint and processor to `TROCR_MODEL_PATH` (
 
 ### 2. Reproduce the fine-tuning
 
-Obtain the original authorized image dataset and labels (not the DrugBank XML). Its exact public source and license are not documented. Adapt the paths and columns in `prepare_trocr_data.py` (requires mapping.json, train/val/test label CSVs) to produce file_name,text CSVs. In Google Colab with a GPU, open `notebooks/fine.ipynb`, adapt ROOT_DIR and place CSVs and train/val/test images in the expected folders. Run cells 1–4: dependencies and Drive, datasets, fine-tuning, held-out evaluation. Historical settings: base handwritten TrOCR, batch 8, 3 epochs, learning rate 4e-5, FP16, selection by validation CER. Check version compatibility, data leakage and checkpoint warnings before reuse. Save both model and processor with save_pretrained (the notebook uses trainer.save_model for the model); copy the complete directory into TROCR_MODEL_PATH. Record fresh metrics separately; exact reproduction is not guaranteed.
+Obtain the original authorized image dataset and labels (not the DrugBank XML). Its exact public source and license are not documented. Adapt the paths and columns in `prepare_trocr_data.py` (requires mapping.json, train/val/test label CSVs) to produce file_name,text CSVs. In Google Colab with a GPU, open `notebooks/01_trocr_medical_finetuning.ipynb`, adapt ROOT_DIR and place CSVs and train/val/test images in the expected folders. Run cells 1–4: dependencies and Drive, datasets, fine-tuning, held-out evaluation. Historical settings: base handwritten TrOCR, batch 8, 3 epochs, learning rate 4e-5, FP16, selection by validation CER. Check version compatibility, data leakage and checkpoint warnings before reuse. Save both model and processor with save_pretrained (the notebook uses trainer.save_model for the model); copy the complete directory into TROCR_MODEL_PATH. Record fresh metrics separately; exact reproduction is not guaranteed.
 
 ### 3. No fine-tuning: generic TrOCR
 
